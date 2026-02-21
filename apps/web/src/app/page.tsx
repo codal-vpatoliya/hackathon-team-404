@@ -37,7 +37,7 @@ export default function SchemaMind() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const nodeTypes = useMemo(() => ({ schemaNode: SchemaNode }), []);
 
-  const PATH_TO_JSON_SCHEMA = "../../src/sanity/schema.json";
+  const PATH_TO_JSON_SCHEMA = "/api/schema";
 
   useEffect(() => {
     fetch(PATH_TO_JSON_SCHEMA)
