@@ -421,7 +421,7 @@ export default function SchemaMind() {
       </div>
 
       {/* Right Side: Chatbot Panel (Remains largely the same, just keeping the map loop clean) */}
-      <div className="w-[450px] flex flex-col h-full bg-white shadow-lg">
+      <div className="w-[625px] flex flex-col h-full bg-white shadow-lg">
         {/* Chat Header with Generate Wiki Button and Settings */}
         <div className="p-5 border-b border-slate-100 bg-white">
           <div className="flex justify-between items-start mb-3">
