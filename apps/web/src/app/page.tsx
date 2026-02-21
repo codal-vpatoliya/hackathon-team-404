@@ -15,11 +15,24 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { parseSanitySchema } from "./lib/parseSchema";
 import SchemaNode from "~/components/SchemaNode";
+import ConnectionModal from "~/components/ConnectionModal";
+import Toast from "~/components/Toast";
+
+interface SanityCredentials {
+  projectId: string;
+  dataset: string;
+  token: string;
+}
 
 export default function SchemaMind() {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [rawSchema, setRawSchema] = useState(null);
+  const [credentials, setCredentials] = useState<SanityCredentials | null>(null);
+  const [showConnectionModal, setShowConnectionModal] = useState(false);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type?: "error" | "success" | "info" } | null>(null);
 
   // Track selected nodes for the GROQ generator
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -37,19 +50,209 @@ export default function SchemaMind() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const nodeTypes = useMemo(() => ({ schemaNode: SchemaNode }), []);
 
-  const PATH_TO_JSON_SCHEMA = "/api/schema";
-
+  // Load credentials from localStorage on mount
   useEffect(() => {
-    fetch(PATH_TO_JSON_SCHEMA)
-      .then((res) => res.json())
-      .then((data) => {
-        setRawSchema(data);
+    const stored = localStorage.getItem("sanity-credentials");
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored);
+        // Validate that projectId is exactly 8 alphanumeric characters (Sanity format)
+        const projectIdRegex = /^[a-zA-Z0-9]{8}$/;
+        const datasetRegex = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+        if (parsed.projectId && projectIdRegex.test(parsed.projectId) && 
+            parsed.dataset && datasetRegex.test(parsed.dataset)) {
+          setCredentials(parsed);
+          return;
+        } else {
+          // Bad credentials - clear and show modal
+          localStorage.removeItem("sanity-credentials");
+          setShowConnectionModal(true);
+        }
+      } catch (e) {
+        console.error("Failed to parse stored credentials");
+        setShowConnectionModal(true);
+      }
+    } else {
+      // Show modal if no credentials
+      setShowConnectionModal(true);
+    }
+  }, []);
+
+  // Fetch schema when credentials change
+  useEffect(() => {
+    if (!credentials) return;
+
+    const fetchSchema = async () => {
+      setSchemaLoading(true);
+      try {
+        // Fetch schema using Sanity's export API
+        const exportUrl = `https://${credentials.projectId}.api.sanity.io/v2021-10-21/data/export/${credentials.dataset}`;
+        
+        const response = await fetch(exportUrl, {
+          headers: {
+            Authorization: `Bearer ${credentials.token}`,
+          },
+        });
+
+        console.log("Schema fetch response status:", response);
+
+        if (!response.ok) {
+          throw new Error(`Failed to connect (${response.status}). Check your credentials.`);
+        }
+
+        // Parse NDJSON (newline-delimited JSON)
+        const text = await response.text();
+        const lines = text.trim().split('\n').filter(line => line.trim());
+        
+        if (lines.length === 0) {
+          throw new Error("Dataset is empty. Please add some documents first.");
+        }
+
+        const documents = lines.map(line => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        }).filter(Boolean);
+
+        // Extract unique document types with reference tracking
+        const typeMap = new Map();
+        const referenceMap = new Map<string, Set<string>>(); // Track field -> target types
+        
+        // First pass: build type map
+        documents.forEach((doc: any) => {
+          const typeName = doc._type;
+          
+          // Skip system types
+          if (!typeName || typeName.startsWith('sanity.') || typeName.startsWith('system.')) {
+            return;
+          }
+          
+          if (!typeMap.has(typeName)) {
+            typeMap.set(typeName, {
+              name: typeName,
+              type: "document",
+              title: typeName.charAt(0).toUpperCase() + typeName.slice(1),
+              fields: []
+            });
+          }
+          
+          // Analyze fields from document
+          const typeInfo = typeMap.get(typeName);
+          Object.keys(doc).forEach(key => {
+            if (!key.startsWith('_')) {
+              const value = doc[key];
+              const fieldType = inferFieldType(value);
+              
+              // Add or update field
+              const existingField = typeInfo.fields.find((f: any) => f.name === key);
+              if (!existingField) {
+                typeInfo.fields.push({ name: key, type: fieldType });
+              }
+              
+              // Track what types are referenced
+              if (fieldType === 'reference' && value._ref && value._type) {
+                const referencedType = value._type;
+                const refKey = `${typeName}.${key}`;
+                if (!referenceMap.has(refKey)) {
+                  referenceMap.set(refKey, new Set());
+                }
+                referenceMap.get(refKey)!.add(referencedType);
+              }
+            }
+          });
+        });
+
+        // Second pass: add "to" array for reference fields
+        typeMap.forEach((typeInfo) => {
+          typeInfo.fields.forEach((field: any) => {
+            const refKey = `${typeInfo.name}.${field.name}`;
+            if (field.type === 'reference' && referenceMap.has(refKey)) {
+              const targetTypes = Array.from(referenceMap.get(refKey)!);
+              field.to = targetTypes.map((type) => ({ type }));
+            }
+          });
+        });
+
+        const schemaData = Array.from(typeMap.values());
+
+        if (schemaData.length === 0) {
+          throw new Error("No document types found. Your dataset may only contain system documents.");
+        }
+
+        setRawSchema(schemaData as any);
         const { nodes: initialNodes, edges: initialEdges } =
-          parseSanitySchema(data);
+          parseSanitySchema(schemaData);
         setNodes(initialNodes);
         setEdges(initialEdges);
-      });
-  }, [setNodes, setEdges]);
+        
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            text: `✅ Schema loaded! Found ${schemaData.length} document type(s). Ask me anything or click two nodes to generate a GROQ query!`,
+          },
+        ]);
+        // Close modal only on success
+        setShowConnectionModal(false);
+      } catch (error: any) {
+        console.error("Schema fetch error:", error);
+        const errorMsg = error.message;
+        setShowConnectionModal(false);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            text: `❌ Failed to load schema: ${errorMsg}`,
+          },
+        ]);
+      } finally {
+        setSchemaLoading(false);
+      }
+    };
+
+    fetchSchema();
+  }, [credentials, setNodes, setEdges]);
+
+  // Helper function to infer field type from value
+  const inferFieldType = (value: any): string => {
+    if (value === null || value === undefined) return 'unknown';
+    if (typeof value === 'string') return 'string';
+    if (typeof value === 'number') return 'number';
+    if (typeof value === 'boolean') return 'boolean';
+    if (Array.isArray(value)) return 'array';
+    if (value._ref) return 'reference';
+    if (value.asset) return 'image';
+    if (typeof value === 'object') return 'object';
+    return 'unknown';
+  };
+
+  const handleConnect = (newCredentials: SanityCredentials) => {
+    setCredentials(newCredentials);
+    localStorage.setItem("sanity-credentials", JSON.stringify(newCredentials));
+    setMessages([
+      {
+        role: "assistant",
+        text: "✅ Connected! Loading your schema...",
+      },
+    ]);
+  };
+
+  const handleDisconnect = () => {
+    setCredentials(null);
+    localStorage.removeItem("sanity-credentials");
+    setRawSchema(null);
+    setNodes([]);
+    setEdges([]);
+    setMessages([
+      {
+        role: "assistant",
+        text: "Disconnected. Connect your project to get started.",
+      },
+    ]);
+    setShowConnectionModal(true);
+  };
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -219,19 +422,73 @@ export default function SchemaMind() {
 
       {/* Right Side: Chatbot Panel (Remains largely the same, just keeping the map loop clean) */}
       <div className="w-[450px] flex flex-col h-full bg-white shadow-lg">
-        {/* UPDATED: Chat Header with Generate Wiki Button */}
-        <div className="p-5 border-b border-slate-100 bg-white flex justify-between items-center">
-          <div>
-            <h1 className="text-xl font-bold text-slate-800">SchemaMind AI</h1>
-            <p className="text-sm text-slate-500">
-              Your content architecture assistant
-            </p>
+        {/* Chat Header with Generate Wiki Button and Settings */}
+        <div className="p-5 border-b border-slate-100 bg-white">
+          <div className="flex justify-between items-start mb-3">
+            <div>
+              <h1 className="text-xl font-bold text-slate-800">SchemaMind AI</h1>
+              <p className="text-sm text-slate-500">
+                Your content architecture assistant
+              </p>
+            </div>
+
+            {/* Settings Icon */}
+            <button
+              onClick={() => setShowConnectionModal(true)}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              title="Connection Settings"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+                stroke="currentColor"
+                className="w-5 h-5 text-slate-600"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+              </svg>
+            </button>
           </div>
 
+          {/* Connection Status */}
+          {credentials ? (
+            <div className="flex items-center justify-between gap-2 bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                <span className="text-xs text-green-700 font-medium">
+                  Connected to {credentials.projectId}
+                </span>
+              </div>
+              <button
+                onClick={handleDisconnect}
+                className="text-xs text-green-700 hover:text-green-900 underline"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              <span className="text-xs text-amber-700">
+                Not connected. Click settings to connect your project.
+              </span>
+            </div>
+          )}
+
+          {/* Generate Wiki Button */}
           <button
             onClick={generateDocumentation}
             disabled={loading || !rawSchema}
-            className="flex items-center gap-1.5 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 rounded-md font-bold transition-colors border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            className="flex items-center justify-center gap-1.5 text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-2 rounded-md font-bold transition-colors border border-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-sm mt-3 w-full"
             title="Generate a Wiki for editors"
           >
             {/* SVG Document Icon */}
@@ -298,6 +555,25 @@ export default function SchemaMind() {
           </form>
         </div>
       </div>
+
+      {/* Connection Modal */}
+      <ConnectionModal
+        isOpen={showConnectionModal}
+        onClose={() => setShowConnectionModal(false)}
+        onConnect={handleConnect}
+        currentConnection={
+          credentials
+            ? { projectId: credentials.projectId, dataset: credentials.dataset }
+            : null
+        }
+      />
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
     </div>
   );
 }
