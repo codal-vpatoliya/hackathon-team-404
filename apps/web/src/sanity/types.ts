@@ -128,6 +128,11 @@ export type Author = {
   _rev: string;
   name: string;
   slug?: Slug;
+  genres?: Array<
+    {
+      _key: string;
+    } & CategoryReference
+  >;
   image?: {
     asset?: SanityImageAssetReference;
     media?: unknown;
