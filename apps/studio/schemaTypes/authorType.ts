@@ -1,5 +1,5 @@
 import {UsersIcon} from '@sanity/icons'
-import {defineField, defineType} from 'sanity'
+import {defineArrayMember, defineField, defineType} from 'sanity'
 
 export const authorType = defineType({
   name: 'author',
@@ -19,6 +19,21 @@ export const authorType = defineType({
       type: 'slug',
       options: {source: 'name', maxLength: 96},
     }),
+
+    // 👇 NEW: Explicitly connect Authors to Categories!
+    defineField({
+      name: 'genres',
+      title: 'Primary Genres',
+      description: 'What categories is this author best known for?',
+      type: 'array',
+      of: [
+        defineArrayMember({
+          type: 'reference',
+          to: [{type: 'category'}],
+        }),
+      ],
+    }),
+
     defineField({
       name: 'image',
       title: 'Photograph',
