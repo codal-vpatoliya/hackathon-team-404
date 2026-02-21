@@ -6,9 +6,9 @@ import {structure} from './structure'
 
 export default defineConfig({
   name: 'default',
-  title: 'Sanity Test',
-  projectId: 'dlelvhfn',
-  dataset: 'sanity-test-db',
+  title: 'Hackathon',
+  projectId: 'pwg7zxhg',
+  dataset: 'production',
   plugins: [
     structureTool({
       structure,

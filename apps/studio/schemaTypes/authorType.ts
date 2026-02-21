@@ -20,7 +20,6 @@ export const authorType = defineType({
       options: {source: 'name', maxLength: 96},
     }),
 
-    // 👇 NEW: Explicitly connect Authors to Categories!
     defineField({
       name: 'genres',
       title: 'Primary Genres',
